@@ -543,6 +543,24 @@ def health():
         "node": bool(shutil.which("node"))
     })
 
+@app.route("/api/cookies", methods=["GET", "POST"])
+def manage_cookies():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        cookie_text = data.get("cookies", "").strip()
+        if not cookie_text:
+            return jsonify({"success": False, "error": "Cookie text khali nahi ho sakta"}), 400
+        try:
+            COOKIES_FILE.write_text(cookie_text, encoding="utf-8")
+            return jsonify({"success": True, "message": "Cookies successfully save ho gayi hain!"})
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+    
+    return jsonify({
+        "has_cookies": COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0,
+        "cookie_file_size": COOKIES_FILE.stat().st_size if COOKIES_FILE.exists() else 0
+    })
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
