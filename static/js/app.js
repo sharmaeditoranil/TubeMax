@@ -42,8 +42,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
     const sampleChips = document.querySelectorAll(".sample-chip");
 
-    // API Base URL (empty for same domain / local, or Render / VPS backend URL)
-    const API_BASE = (window.API_BASE || "").replace(/\/$/, "");
+    // API Base URL: local if on localhost, otherwise auto-point to Render backend
+    const isLocal = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
+    const API_BASE = (window.API_BASE !== undefined ? window.API_BASE : (isLocal ? "" : "https://tubemax.onrender.com")).replace(/\/$/, "");
 
     // State
     let currentVideoData = null;
