@@ -42,6 +42,9 @@ document.addEventListener("DOMContentLoaded", () => {
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
     const sampleChips = document.querySelectorAll(".sample-chip");
 
+    // API Base URL (empty for same domain / local, or Render / VPS backend URL)
+    const API_BASE = (window.API_BASE || "").replace(/\/$/, "");
+
     // State
     let currentVideoData = null;
     let selectedQuality = "1080p";
@@ -120,7 +123,7 @@ document.addEventListener("DOMContentLoaded", () => {
         setFetchLoading(true);
 
         try {
-            const res = await fetch("/api/info", {
+            const res = await fetch(`${API_BASE}/api/info`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ url })
@@ -232,7 +235,7 @@ document.addEventListener("DOMContentLoaded", () => {
         progressSection.scrollIntoView({ behavior: "smooth", block: "center" });
 
         try {
-            const res = await fetch("/api/download", {
+            const res = await fetch(`${API_BASE}/api/download`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -262,7 +265,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         activePollInterval = setInterval(async () => {
             try {
-                const res = await fetch(`/api/progress/${taskId}`);
+                const res = await fetch(`${API_BASE}/api/progress/${taskId}`);
                 if (!res.ok) {
                     clearInterval(activePollInterval);
                     return;
@@ -303,7 +306,8 @@ document.addEventListener("DOMContentLoaded", () => {
         startDownloadBtn.disabled = false;
 
         completedDetails.textContent = `${task.filename} (${task.filesize})`;
-        saveFileLink.href = task.download_url;
+        const fileDownloadUrl = `${API_BASE}${task.download_url}`;
+        saveFileLink.href = fileDownloadUrl;
         saveFileLink.setAttribute("download", task.filename);
         completedBox.style.display = "flex";
 
@@ -312,7 +316,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // Auto trigger save to browser downloads
         const autoSave = document.createElement("a");
-        autoSave.href = task.download_url;
+        autoSave.href = fileDownloadUrl;
         autoSave.setAttribute("download", task.filename);
         document.body.appendChild(autoSave);
         autoSave.click();
@@ -322,7 +326,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // Open Downloads Folder in Mac Finder
     openFolderBtn.addEventListener("click", async () => {
         try {
-            const res = await fetch("/api/open-downloads", { method: "POST" });
+            const res = await fetch(`${API_BASE}/api/open-downloads`, { method: "POST" });
             const data = await res.json();
             if (data.success) {
                 showToast("Mac Finder me Downloads folder open ho gaya! 📂", "success");
@@ -349,7 +353,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function loadHistory() {
         try {
-            const res = await fetch("/api/history");
+            const res = await fetch(`${API_BASE}/api/history`);
             const data = await res.json();
             if (data.success) {
                 renderHistory(data.files);
@@ -388,7 +392,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     </div>
                 </div>
                 <div class="history-actions">
-                    <a href="/api/history/download/${encodeURIComponent(f.filename)}" class="btn btn-secondary btn-sm" download title="Download to Mac">
+                    <a href="${API_BASE}/api/history/download/${encodeURIComponent(f.filename)}" class="btn btn-secondary btn-sm" download title="Download to Mac">
                         ⬇ Save
                     </a>
                     <button class="btn btn-ghost btn-sm delete-file-btn" data-filename="${encodeURIComponent(f.filename)}" title="Delete File">
@@ -410,7 +414,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function deleteFile(filename) {
         try {
-            const res = await fetch(`/api/history/${filename}`, { method: "DELETE" });
+            const res = await fetch(`${API_BASE}/api/history/${filename}`, { method: "DELETE" });
             const data = await res.json();
             if (data.success) {
                 showToast("File delete ho gayi", "success");
