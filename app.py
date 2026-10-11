@@ -495,6 +495,40 @@ def download_history_file(filename):
     return "File not found", 404
 
 
+@app.route("/robots.txt")
+def robots_txt():
+    content = """User-agent: *
+Allow: /
+Disallow: /api/
+Sitemap: https://tubemax4k.com/sitemap.xml
+"""
+    return Response(content, mimetype="text/plain")
+
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    content = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://tubemax4k.com/</loc>
+    <lastmod>2026-10-11</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>
+"""
+    return Response(content, mimetype="application/xml")
+
+
+@app.route("/favicon.ico")
+def favicon():
+    svg_icon = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+        <rect width="32" height="32" rx="8" fill="#ff0033"/>
+        <polygon points="12,9 23,16 12,23" fill="#ffffff"/>
+    </svg>"""
+    return Response(svg_icon, mimetype="image/svg+xml")
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
     print(f"🚀 YouTube Video Downloader running on http://127.0.0.1:{port}")
