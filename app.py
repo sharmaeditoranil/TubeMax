@@ -6,6 +6,7 @@ import uuid
 import re
 import subprocess
 import threading
+import shutil
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file, Response
 from flask_cors import CORS
@@ -57,6 +58,29 @@ def format_bytes(size):
         n += 1
     return f"{size:.1f} {power_labels[n]}"
 
+COOKIES_FILE = BASE_DIR / "cookies.txt"
+
+def ensure_cookies():
+    """Sync cookies from YOUTUBE_COOKIES environment variable if provided."""
+    env_cookies = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if env_cookies:
+        try:
+            if not COOKIES_FILE.exists() or COOKIES_FILE.read_text(encoding="utf-8").strip() != env_cookies:
+                COOKIES_FILE.write_text(env_cookies, encoding="utf-8")
+                print("[TubeMax] Updated cookies.txt from YOUTUBE_COOKIES env var.")
+        except Exception as e:
+            print(f"[TubeMax] Failed writing cookies: {e}")
+
+def get_yt_base_args():
+    ensure_cookies()
+    args = [
+        "--no-check-certificates",
+        "--socket-timeout", "30",
+    ]
+    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
+        args.extend(["--cookies", str(COOKIES_FILE)])
+    return args
+
 def sanitize_filename(name):
     # Keep alphanumeric, spaces, and common safe chars
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
@@ -73,39 +97,67 @@ def get_info():
     if not url:
         return jsonify({"success": False, "error": "Kripya YouTube video link enter karein"}), 400
 
-    cmd = [
-        YT_DLP_BIN,
-        "--dump-single-json",
-        "--skip-download",
-        "--no-playlist",
-        "--ffmpeg-location", FFMPEG_BIN,
-        url
+    base_args = get_yt_base_args()
+
+    # Multi-strategy retry for anti-bot / datacenter protection
+    strategies = [
+        [],  # 1. Standard extractor (uses Deno for n-challenge)
+        ["--extractor-args", "youtube:player_client=visionos,android_vr,tv,web"],  # 2. VisionOS / Android VR
+        ["--extractor-args", "youtube:player_client=android,ios,mweb"]   # 3. Mobile fallback
     ]
 
+    env = os.environ.copy()
+    env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
+
+    last_error = ""
+    info = None
+
+    for extra_args in strategies:
+        cmd = [
+            YT_DLP_BIN,
+            *base_args,
+            *extra_args,
+            "--dump-single-json",
+            "--skip-download",
+            "--no-playlist",
+            "--ffmpeg-location", FFMPEG_BIN,
+            url
+        ]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=35,
+                env=env
+            )
+
+            if proc.returncode == 0:
+                try:
+                    info = json.loads(proc.stdout)
+                    break
+                except Exception:
+                    pass
+            else:
+                last_error = proc.stderr.strip()
+                # Fast exit for permanent errors
+                if "Video unavailable" in last_error or "Private video" in last_error:
+                    break
+        except subprocess.TimeoutExpired:
+            last_error = "YouTube server response timeout ho gaya (35s)."
+            continue
+
+    if not info:
+        if "Video unavailable" in last_error:
+            return jsonify({"success": False, "error": "Yeh video available nahi hai ya private hai."}), 400
+        elif "Private video" in last_error:
+            return jsonify({"success": False, "error": "Yeh video private hai."}), 400
+        elif "Sign in" in last_error:
+            return jsonify({"success": False, "error": "YouTube anti-bot verification trigger hua hai. Thodi der me retry karein."}), 400
+        return jsonify({"success": False, "error": f"Video fetch nahi ho saka: {last_error[:200]}"}), 400
+
     try:
-        env = os.environ.copy()
-        env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
-        
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env
-        )
-
-        if proc.returncode != 0:
-            err_msg = proc.stderr.strip()
-            if "Video unavailable" in err_msg:
-                return jsonify({"success": False, "error": "Yeh video available nahi hai ya private hai."}), 400
-            elif "Private video" in err_msg:
-                return jsonify({"success": False, "error": "Yeh video private hai."}), 400
-            elif "Sign in" in err_msg:
-                return jsonify({"success": False, "error": "Is video ke liye YouTube sign-in required hai."}), 400
-            return jsonify({"success": False, "error": f"Video fetch nahi ho saka: {err_msg[:200]}"}), 400
-
-        info = json.loads(proc.stdout)
-        
         formats = info.get("formats", [])
         heights = set(f.get("height") for f in formats if f.get("height"))
 
@@ -213,10 +265,8 @@ def get_info():
         }
         return jsonify(response_data)
 
-    except subprocess.TimeoutExpired:
-        return jsonify({"success": False, "error": "Request timed out. YouTube server response nahi de raha."}), 504
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "error": f"Metadata parsing error: {str(e)}"}), 500
 
 
 def run_download_worker(task_id, url, quality, title):
@@ -231,91 +281,40 @@ def run_download_worker(task_id, url, quality, title):
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
 
+    base_args = get_yt_base_args()
+
     if quality == "mp3":
-        cmd = [
-            YT_DLP_BIN,
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", "0",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
         expected_ext = "mp3"
     elif quality == "m4a":
-        cmd = [
-            YT_DLP_BIN,
-            "-x",
-            "--audio-format", "m4a",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-x", "--audio-format", "m4a"]
         expected_ext = "m4a"
     elif quality in ("4k", "2160p"):
-        cmd = [
-            YT_DLP_BIN,
-            "-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best", "--merge-output-format", "mp4"]
         expected_ext = "mp4"
     elif quality in ("2k", "1440p"):
-        cmd = [
-            YT_DLP_BIN,
-            "-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best", "--merge-output-format", "mp4"]
         expected_ext = "mp4"
     elif quality == "1080p":
-        cmd = [
-            YT_DLP_BIN,
-            "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "--merge-output-format", "mp4"]
         expected_ext = "mp4"
     elif quality == "720p":
-        cmd = [
-            YT_DLP_BIN,
-            "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best", "--merge-output-format", "mp4"]
         expected_ext = "mp4"
     else:  # 480p or default
-        cmd = [
-            YT_DLP_BIN,
-            "-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", FFMPEG_BIN,
-            "-o", out_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
-            url
-        ]
+        format_args = ["-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best", "--merge-output-format", "mp4"]
         expected_ext = "mp4"
+
+    cmd = [
+        YT_DLP_BIN,
+        *base_args,
+        *format_args,
+        "--ffmpeg-location", FFMPEG_BIN,
+        "-o", out_template,
+        "--newline",
+        "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
+        url
+    ]
 
     try:
         with tasks_lock:
@@ -331,10 +330,15 @@ def run_download_worker(task_id, url, quality, title):
             env=env
         )
 
+        last_lines = []
         for line in proc.stdout:
             line = line.strip()
             if not line:
                 continue
+
+            last_lines.append(line)
+            if len(last_lines) > 12:
+                last_lines.pop(0)
 
             # Check if line matches our progress template: percent|speed|eta|status
             if "|" in line:
@@ -378,9 +382,12 @@ def run_download_worker(task_id, url, quality, title):
                     task["status"] = "error"
                     task["message"] = "Download ho gaya par output file nahi mili."
         else:
+            err_line = next((l for l in reversed(last_lines) if "error" in l.lower()), "")
+            if not err_line and last_lines:
+                err_line = last_lines[-1]
             with tasks_lock:
                 task["status"] = "error"
-                task["message"] = "Download fail ho gaya. YouTube restriction ya network error."
+                task["message"] = f"Download fail ho gaya: {err_line[:140]}" if err_line else "Download fail ho gaya. YouTube anti-bot restriction."
 
     except Exception as e:
         with tasks_lock:
@@ -526,7 +533,15 @@ def favicon():
         <rect width="32" height="32" rx="8" fill="#ff0033"/>
         <polygon points="12,9 23,16 12,23" fill="#ffffff"/>
     </svg>"""
-    return Response(svg_icon, mimetype="image/svg+xml")
+@app.route("/api/health")
+def health():
+    return jsonify({
+        "status": "healthy",
+        "service": "TubeMax 4K Studio Backend",
+        "has_cookies": COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0,
+        "deno": bool(shutil.which("deno")),
+        "node": bool(shutil.which("node"))
+    })
 
 
 if __name__ == "__main__":
