@@ -137,9 +137,11 @@ def get_info():
 
     # Multi-strategy retry for anti-bot / datacenter protection
     strategies = [
-        ["--extractor-args", "youtube:player_client=visionos"],       # 1. VisionOS (bypasses bot challenges & SABR issues)
-        ["--extractor-args", "youtube:player_client=android_vr,tv"],  # 2. VR/TV fallback
-        [],                                                           # 3. Standard Deno fallback
+        ["--extractor-args", "youtube:player_client=android_vr"],      # 1. Android VR (bypasses bot challenges & SABR without PO token)
+        ["--extractor-args", "youtube:player_client=android"],         # 2. Android client
+        ["--extractor-args", "youtube:player_client=ios"],             # 3. iOS client
+        ["--extractor-args", "youtube:player_client=mweb"],            # 4. Mobile web fallback
+        [],                                                            # 5. Standard fallback
     ]
 
     env = os.environ.copy()
@@ -342,7 +344,7 @@ def run_download_worker(task_id, url, quality, title):
     cmd = [
         YT_DLP_BIN,
         *base_args,
-        "--extractor-args", "youtube:player_client=visionos",
+        "--extractor-args", "youtube:player_client=android_vr",
         *format_args,
     ]
     if FFMPEG_BIN and os.path.exists(FFMPEG_BIN):
