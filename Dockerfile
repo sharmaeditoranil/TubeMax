@@ -28,5 +28,5 @@ COPY . .
 ENV PORT=5005
 EXPOSE 5005
 
-# Start Gunicorn server
-CMD ["gunicorn", "--bind", "0.0.0.0:5005", "--workers", "2", "--threads", "4", "--timeout", "120", "app:app"]
+# Start Gunicorn server (Single worker with 4 threads ensures shared memory and prevents Render 512MB OOM)
+CMD ["gunicorn", "--bind", "0.0.0.0:5005", "--workers", "1", "--threads", "4", "--timeout", "300", "app:app"]

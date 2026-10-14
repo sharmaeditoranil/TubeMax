@@ -108,17 +108,19 @@ body {
 }
 
 .brand-logo-img {
-    height: 40px;
+    height: 32px;
     width: auto;
-    max-width: 62px;
+    max-width: 48px;
     object-fit: contain;
-    filter: drop-shadow(0 0 12px rgba(0, 168, 255, 0.45));
+    filter: drop-shadow(0 0 10px rgba(0, 168, 255, 0.4));
     transition: var(--transition);
+    display: inline-block;
+    vertical-align: middle;
 }
 
 .brand-logo:hover .brand-logo-img {
-    transform: scale(1.08);
-    filter: drop-shadow(0 0 20px rgba(0, 168, 255, 0.75));
+    transform: scale(1.06);
+    filter: drop-shadow(0 0 18px rgba(0, 168, 255, 0.75));
 }
 
 .logo-icon {
@@ -1311,6 +1313,11 @@ body {
     }
     .brand-logo {
         justify-content: center;
+        gap: 10px;
+    }
+    .brand-logo-img {
+        height: 28px;
+        max-width: 42px;
     }
     .header-actions {
         display: grid;

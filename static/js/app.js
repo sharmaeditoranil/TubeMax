@@ -264,13 +264,21 @@ document.addEventListener("DOMContentLoaded", () => {
     function pollProgress(taskId) {
         if (activePollInterval) clearInterval(activePollInterval);
 
+        let pollFails = 0;
         activePollInterval = setInterval(async () => {
             try {
                 const res = await fetch(`${API_BASE}/api/progress/${taskId}`);
                 if (!res.ok) {
-                    clearInterval(activePollInterval);
+                    pollFails++;
+                    if (pollFails > 10) {
+                        clearInterval(activePollInterval);
+                        showError("Download Status", "Server response timeout ho gaya. Kripya dobara try karein.");
+                        progressSpinner.style.display = "none";
+                        startDownloadBtn.disabled = false;
+                    }
                     return;
                 }
+                pollFails = 0;
                 const data = await res.json();
                 const task = data.task;
 

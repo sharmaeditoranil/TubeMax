@@ -18,13 +18,49 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_DIR = BASE_DIR / "downloads"
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-# Locate binaries (Brew defaults or PATH)
-YT_DLP_BIN = "/opt/homebrew/bin/yt-dlp" if os.path.exists("/opt/homebrew/bin/yt-dlp") else "yt-dlp"
-FFMPEG_BIN = "/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "ffmpeg"
+# Locate binaries with robust detection
+def get_binary_path(name):
+    p = shutil.which(name)
+    if p and os.path.exists(p):
+        return p
+    for candidate in [
+        f"/opt/homebrew/bin/{name}",
+        f"/usr/local/bin/{name}",
+        f"/usr/bin/{name}",
+        f"/bin/{name}"
+    ]:
+        if os.path.exists(candidate):
+            return candidate
+    return name
 
-# Store active download tasks in memory
+YT_DLP_BIN = get_binary_path("yt-dlp")
+FFMPEG_BIN = get_binary_path("ffmpeg")
+
+# Store active download tasks in memory and persist to disk
+TASKS_FILE = DOWNLOAD_DIR / ".tasks.json"
 tasks_lock = threading.Lock()
 tasks = {}
+
+def save_task(task_id, task_data):
+    with tasks_lock:
+        tasks[task_id] = task_data
+        try:
+            TASKS_FILE.write_text(json.dumps(tasks), encoding="utf-8")
+        except Exception:
+            pass
+
+def get_task(task_id):
+    with tasks_lock:
+        if task_id in tasks:
+            return tasks[task_id]
+        if TASKS_FILE.exists():
+            try:
+                loaded = json.loads(TASKS_FILE.read_text(encoding="utf-8"))
+                tasks.update(loaded)
+                return tasks.get(task_id)
+            except Exception:
+                pass
+        return None
 
 def format_duration(seconds):
     if not seconds:
@@ -120,7 +156,6 @@ def get_info():
             "--dump-single-json",
             "--skip-download",
             "--no-playlist",
-            "--ffmpeg-location", FFMPEG_BIN,
             url
         ]
 
@@ -270,10 +305,9 @@ def get_info():
 
 
 def run_download_worker(task_id, url, quality, title):
-    with tasks_lock:
-        task = tasks.get(task_id)
-        if not task:
-            return
+    task = get_task(task_id)
+    if not task:
+        return
 
     safe_title = sanitize_filename(title or "youtube_video")[:80]
     out_template = str(DOWNLOAD_DIR / f"{safe_title}_{task_id}.%(ext)s")
@@ -310,17 +344,21 @@ def run_download_worker(task_id, url, quality, title):
         *base_args,
         "--extractor-args", "youtube:player_client=visionos",
         *format_args,
-        "--ffmpeg-location", FFMPEG_BIN,
+    ]
+    if FFMPEG_BIN and os.path.exists(FFMPEG_BIN):
+        cmd.extend(["--ffmpeg-location", FFMPEG_BIN])
+
+    cmd.extend([
         "-o", out_template,
         "--newline",
         "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
         url
-    ]
+    ])
 
     try:
-        with tasks_lock:
-            task["status"] = "downloading"
-            task["message"] = "Downloading streams from YouTube..."
+        task["status"] = "downloading"
+        task["message"] = "Downloading streams from YouTube..."
+        save_task(task_id, task)
 
         proc = subprocess.Popen(
             cmd,
@@ -351,49 +389,93 @@ def run_download_worker(task_id, url, quality, title):
                     except ValueError:
                         pct_val = task["percent"]
 
-                    with tasks_lock:
-                        task["percent"] = pct_val
-                        task["speed"] = parts[1].strip() if parts[1].strip() != "NA" else task["speed"]
-                        task["eta"] = parts[2].strip() if parts[2].strip() != "NA" else task["eta"]
-                        if parts[3].strip() == "finished":
-                            task["message"] = "Merging Video & Audio with FFmpeg..."
-                        else:
-                            task["message"] = f"Downloading... {task['percent']:.1f}%"
+                    task["percent"] = pct_val
+                    task["speed"] = parts[1].strip() if parts[1].strip() != "NA" else task["speed"]
+                    task["eta"] = parts[2].strip() if parts[2].strip() != "NA" else task["eta"]
+                    if parts[3].strip() == "finished":
+                        task["message"] = "Merging Video & Audio with FFmpeg..."
+                    else:
+                        task["message"] = f"Downloading... {task['percent']:.1f}%"
+                    save_task(task_id, task)
             elif "[Merger]" in line or "Merging" in line or "[ffmpeg]" in line:
-                with tasks_lock:
-                    task["message"] = "FFmpeg merging Full HD audio and video..."
-                    task["percent"] = 99.0
+                task["message"] = "FFmpeg merging Full HD audio and video..."
+                task["percent"] = 99.0
+                save_task(task_id, task)
 
         proc.wait()
 
-        if proc.returncode == 0:
-            # Locate downloaded file matching task_id
-            matched_files = list(DOWNLOAD_DIR.glob(f"*{task_id}.*"))
-            if matched_files:
-                final_file = matched_files[0]
-                with tasks_lock:
-                    task["status"] = "completed"
-                    task["percent"] = 100.0
-                    task["message"] = "Download and merge completed successfully!"
-                    task["filename"] = final_file.name
-                    task["filesize"] = format_bytes(final_file.stat().st_size)
-                    task["download_url"] = f"/api/file/{task_id}"
-            else:
-                with tasks_lock:
-                    task["status"] = "error"
-                    task["message"] = "Download ho gaya par output file nahi mili."
+        # Check downloaded files for this task
+        all_task_files = list(DOWNLOAD_DIR.glob(f"*{task_id}.*"))
+        
+        # Check if already has a clean merged file (not partial, not raw format stream)
+        final_files = [
+            f for f in all_task_files 
+            if not f.name.endswith(".part") 
+            and not f.name.endswith(".ytdl")
+            and not re.search(r'\.f\d+\.', f.name)
+        ]
+
+        # Safety Net: If separate stream files were downloaded but not merged, merge them now with FFmpeg!
+        if not final_files and all_task_files and FFMPEG_BIN and os.path.exists(FFMPEG_BIN):
+            v_candidates = [f for f in all_task_files if re.search(r'\.f\d+\.(mp4|webm|mkv)$', f.name) and not f.name.endswith(".part")]
+            a_candidates = [f for f in all_task_files if re.search(r'\.f\d+\.(m4a|webm|opus|mp3)$', f.name) and not f.name.endswith(".part")]
+            
+            if v_candidates and a_candidates:
+                v_file = v_candidates[0]
+                a_file = a_candidates[0]
+                merged_target = DOWNLOAD_DIR / f"{safe_title}_{task_id}.mp4"
+                
+                task["message"] = "Merging video & audio streams with FFmpeg..."
+                task["percent"] = 99.0
+                save_task(task_id, task)
+
+                merge_cmd = [
+                    FFMPEG_BIN, "-y",
+                    "-i", str(v_file),
+                    "-i", str(a_file),
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    str(merged_target)
+                ]
+                m_proc = subprocess.run(merge_cmd, capture_output=True, text=True, timeout=120)
+                if m_proc.returncode == 0 and merged_target.exists():
+                    final_files = [merged_target]
+                    try:
+                        v_file.unlink(missing_ok=True)
+                        a_file.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        if final_files:
+            final_file = final_files[0]
+            task["status"] = "completed"
+            task["percent"] = 100.0
+            task["message"] = "Download and merge completed successfully!"
+            task["filename"] = final_file.name
+            task["filesize"] = format_bytes(final_file.stat().st_size)
+            task["download_url"] = f"/api/file/{task_id}"
+            save_task(task_id, task)
+        elif proc.returncode == 0 and all_task_files:
+            final_file = all_task_files[0]
+            task["status"] = "completed"
+            task["percent"] = 100.0
+            task["message"] = "Download completed successfully!"
+            task["filename"] = final_file.name
+            task["filesize"] = format_bytes(final_file.stat().st_size)
+            task["download_url"] = f"/api/file/{task_id}"
+            save_task(task_id, task)
         else:
             err_line = next((l for l in reversed(last_lines) if "error" in l.lower()), "")
             if not err_line and last_lines:
                 err_line = last_lines[-1]
-            with tasks_lock:
-                task["status"] = "error"
-                task["message"] = f"Download fail ho gaya: {err_line[:140]}" if err_line else "Download fail ho gaya. YouTube anti-bot restriction."
+            task["status"] = "error"
+            task["message"] = f"Download fail ho gaya: {err_line[:140]}" if err_line else "Download fail ho gaya. YouTube restriction ya network error."
+            save_task(task_id, task)
 
     except Exception as e:
-        with tasks_lock:
-            task["status"] = "error"
-            task["message"] = f"Error: {str(e)}"
+        task["status"] = "error"
+        task["message"] = f"Error: {str(e)}"
+        save_task(task_id, task)
 
 
 @app.route("/api/download", methods=["POST"])
@@ -424,10 +506,8 @@ def start_download():
         "created_at": time.time()
     }
 
-    with tasks_lock:
-        tasks[task_id] = task_obj
+    save_task(task_id, task_obj)
 
-    # Start background thread
     t = threading.Thread(target=run_download_worker, args=(task_id, url, quality, title), daemon=True)
     t.start()
 
@@ -436,22 +516,28 @@ def start_download():
 
 @app.route("/api/progress/<task_id>")
 def get_progress(task_id):
-    with tasks_lock:
-        task = tasks.get(task_id)
-        if not task:
-            return jsonify({"success": False, "error": "Task not found"}), 404
-        return jsonify({"success": True, "task": task})
+    task = get_task(task_id)
+    if not task:
+        return jsonify({"success": False, "error": "Task not found"}), 404
+    return jsonify({"success": True, "task": task})
 
 
 @app.route("/api/file/<task_id>")
 def serve_file(task_id):
-    matched_files = list(DOWNLOAD_DIR.glob(f"*{task_id}.*"))
-    if not matched_files:
+    all_files = list(DOWNLOAD_DIR.glob(f"*{task_id}.*"))
+    if not all_files:
         return "File not found", 404
     
-    file_path = matched_files[0]
-    # Clean display name by removing the _task_id suffix
+    # Prefer clean merged file
+    final_files = [
+        f for f in all_files
+        if not f.name.endswith(".part")
+        and not f.name.endswith(".ytdl")
+        and not re.search(r'\.f\d+\.', f.name)
+    ]
+    file_path = final_files[0] if final_files else all_files[0]
     display_name = re.sub(f"_{task_id}\\.", ".", file_path.name)
+    display_name = re.sub(r'\.f\d+\.', '.', display_name)
     return send_file(file_path, as_attachment=True, download_name=display_name)
 
 
@@ -540,6 +626,8 @@ def health():
         "status": "healthy",
         "service": "TubeMax 4K Studio Backend",
         "has_cookies": COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0,
+        "ffmpeg": bool(FFMPEG_BIN and os.path.exists(FFMPEG_BIN)),
+        "ffmpeg_path": FFMPEG_BIN,
         "deno": bool(shutil.which("deno")),
         "node": bool(shutil.which("node"))
     })
