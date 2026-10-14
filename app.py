@@ -318,33 +318,34 @@ def run_download_worker(task_id, url, quality, title):
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
 
     base_args = get_yt_base_args()
+    has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
     if quality == "mp3":
         format_args = ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
-        expected_ext = "mp3"
+        client_arg = ["--extractor-args", "youtube:player_client=android"]
     elif quality == "m4a":
         format_args = ["-x", "--audio-format", "m4a"]
-        expected_ext = "m4a"
+        client_arg = ["--extractor-args", "youtube:player_client=android"]
     elif quality in ("4k", "2160p"):
-        format_args = ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best", "--merge-output-format", "mp4"]
-        expected_ext = "mp4"
+        format_args = ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best/b", "--merge-output-format", "mp4"]
+        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
     elif quality in ("2k", "1440p"):
-        format_args = ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best", "--merge-output-format", "mp4"]
-        expected_ext = "mp4"
+        format_args = ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best/b", "--merge-output-format", "mp4"]
+        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
     elif quality == "1080p":
-        format_args = ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "--merge-output-format", "mp4"]
-        expected_ext = "mp4"
+        format_args = ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/b", "--merge-output-format", "mp4"]
+        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
     elif quality == "720p":
-        format_args = ["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best", "--merge-output-format", "mp4"]
-        expected_ext = "mp4"
+        format_args = ["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best/b", "--merge-output-format", "mp4"]
+        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
     else:  # 480p or default
-        format_args = ["-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best", "--merge-output-format", "mp4"]
-        expected_ext = "mp4"
+        format_args = ["-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best/b", "--merge-output-format", "mp4"]
+        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
 
     cmd = [
         YT_DLP_BIN,
         *base_args,
-        "--extractor-args", "youtube:player_client=android_vr",
+        *client_arg,
         *format_args,
     ]
     if FFMPEG_BIN and os.path.exists(FFMPEG_BIN):
@@ -416,6 +417,50 @@ def run_download_worker(task_id, url, quality, title):
             and not f.name.endswith(".ytdl")
             and not re.search(r'\.f\d+\.', f.name)
         ]
+
+        # Automatic Fallback: If initial download failed (e.g. 403 Forbidden on DASH streams), auto-retry with android progressive stream
+        if not final_files and any("403" in l or "forbidden" in l.lower() for l in last_lines):
+            task["message"] = "Retrying with direct stream fallback..."
+            save_task(task_id, task)
+
+            fb_format = ["-x", "--audio-format", quality] if quality in ("mp3", "m4a") else ["-f", "best/b", "--merge-output-format", "mp4"]
+            fb_cmd = [
+                YT_DLP_BIN,
+                *base_args,
+                "--extractor-args", "youtube:player_client=android",
+                *fb_format,
+            ]
+            if FFMPEG_BIN and os.path.exists(FFMPEG_BIN):
+                fb_cmd.extend(["--ffmpeg-location", FFMPEG_BIN])
+            fb_cmd.extend([
+                "-o", out_template,
+                "--newline",
+                "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.status)s",
+                url
+            ])
+
+            fb_proc = subprocess.Popen(fb_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env)
+            for line in fb_proc.stdout:
+                line = line.strip()
+                if "|" in line:
+                    parts = line.split("|")
+                    if len(parts) >= 4:
+                        try:
+                            task["percent"] = float(parts[0].replace("%", "").strip())
+                            task["speed"] = parts[1].strip() if parts[1].strip() != "NA" else task["speed"]
+                            task["eta"] = parts[2].strip() if parts[2].strip() != "NA" else task["eta"]
+                            task["message"] = f"Downloading... {task['percent']:.1f}%"
+                            save_task(task_id, task)
+                        except Exception:
+                            pass
+            fb_proc.wait()
+            all_task_files = list(DOWNLOAD_DIR.glob(f"*{task_id}.*"))
+            final_files = [
+                f for f in all_task_files 
+                if not f.name.endswith(".part") 
+                and not f.name.endswith(".ytdl")
+                and not re.search(r'\.f\d+\.', f.name)
+            ]
 
         # Safety Net: If separate stream files were downloaded but not merged, merge them now with FFmpeg!
         if not final_files and all_task_files and FFMPEG_BIN and os.path.exists(FFMPEG_BIN):
