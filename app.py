@@ -107,14 +107,14 @@ def ensure_cookies():
         except Exception as e:
             print(f"[TubeMax] Failed writing cookies: {e}")
 
-def get_yt_base_args():
+def get_yt_base_args(with_cookies=True):
     ensure_cookies()
     args = [
         "-4",
         "--no-check-certificates",
         "--socket-timeout", "30",
     ]
-    if COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
+    if with_cookies and COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
         args.extend(["--cookies", str(COOKIES_FILE)])
     return args
 
@@ -140,16 +140,24 @@ def get_info():
         clean_id = match.group(1)
         url = f"https://www.youtube.com/watch?v={clean_id}"
 
-    base_args = get_yt_base_args()
+    has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
     # Multi-strategy retry for anti-bot / datacenter protection
-    strategies = [
-        ["--extractor-args", "youtube:player_client=android_vr"],      # 1. Android VR (bypasses bot challenges & SABR without PO token)
-        ["--extractor-args", "youtube:player_client=android"],         # 2. Android client
-        ["--extractor-args", "youtube:player_client=ios"],             # 3. iOS client
-        ["--extractor-args", "youtube:player_client=mweb"],            # 4. Mobile web fallback
-        [],                                                            # 5. Standard fallback
-    ]
+    # Note: android/android_vr clients do NOT support cookies, web client does!
+    if has_cookies:
+        strategies = [
+            ([], True),                                                            # 1. Web client with cookies
+            (["--extractor-args", "youtube:player_client=android_vr"], False),     # 2. Android VR without cookies
+            (["--extractor-args", "youtube:player_client=android"], False),        # 3. Android without cookies
+            (["--extractor-args", "youtube:player_client=mweb"], True),            # 4. Mobile web with cookies
+        ]
+    else:
+        strategies = [
+            (["--extractor-args", "youtube:player_client=android_vr"], False),     # 1. Android VR (bypasses bot challenges)
+            (["--extractor-args", "youtube:player_client=android"], False),        # 2. Android client
+            (["--extractor-args", "youtube:player_client=mweb"], False),           # 3. Mobile web fallback
+            ([], False),                                                           # 4. Standard fallback
+        ]
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
@@ -157,7 +165,8 @@ def get_info():
     last_error = ""
     info = None
 
-    for extra_args in strategies:
+    for extra_args, use_cookies in strategies:
+        base_args = get_yt_base_args(with_cookies=use_cookies)
         cmd = [
             YT_DLP_BIN,
             *base_args,
@@ -332,30 +341,15 @@ def run_download_worker(task_id, url, quality, title):
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
 
-    base_args = get_yt_base_args()
-    has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
-
-    if quality == "mp3":
-        format_args = ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
+    if quality in ("mp3", "m4a"):
+        format_args = ["-x", "--audio-format", quality]
+        base_args = get_yt_base_args(with_cookies=False)
         client_arg = ["--extractor-args", "youtube:player_client=android"]
-    elif quality == "m4a":
-        format_args = ["-x", "--audio-format", "m4a"]
+    else:
+        # Android client downloads progressive stream natively without cookies or 403 blocks
+        format_args = ["-f", "best/b", "--merge-output-format", "mp4"]
+        base_args = get_yt_base_args(with_cookies=False)
         client_arg = ["--extractor-args", "youtube:player_client=android"]
-    elif quality in ("4k", "2160p"):
-        format_args = ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best/b", "--merge-output-format", "mp4"]
-        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
-    elif quality in ("2k", "1440p"):
-        format_args = ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best/b", "--merge-output-format", "mp4"]
-        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
-    elif quality == "1080p":
-        format_args = ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best/b", "--merge-output-format", "mp4"]
-        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
-    elif quality == "720p":
-        format_args = ["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best/b", "--merge-output-format", "mp4"]
-        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
-    else:  # 480p or default
-        format_args = ["-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best/b", "--merge-output-format", "mp4"]
-        client_arg = ["--extractor-args", "youtube:player_client=android_vr,android"] if has_cookies else ["--extractor-args", "youtube:player_client=android"]
 
     cmd = [
         YT_DLP_BIN,
@@ -439,9 +433,10 @@ def run_download_worker(task_id, url, quality, title):
             save_task(task_id, task)
 
             fb_format = ["-x", "--audio-format", quality] if quality in ("mp3", "m4a") else ["-f", "best/b", "--merge-output-format", "mp4"]
+            fb_base_args = get_yt_base_args(with_cookies=False)
             fb_cmd = [
                 YT_DLP_BIN,
-                *base_args,
+                *fb_base_args,
                 "--extractor-args", "youtube:player_client=android",
                 *fb_format,
             ]
