@@ -130,7 +130,19 @@ document.addEventListener("DOMContentLoaded", () => {
                 body: JSON.stringify({ url })
             });
 
-            const data = await res.json();
+            let data;
+            const cType = res.headers.get("content-type") || "";
+            if (cType.includes("application/json")) {
+                data = await res.json();
+            } else {
+                const rawText = await res.text();
+                if (res.status === 502 || res.status === 503 || rawText.includes("<!DOCTYPE")) {
+                    showError("Server Starting", "Backend server abhi deploy/wake-up ho raha hai. Kripya 10 second ruk kar dobara 'Fetch Video' dabayein.");
+                    return;
+                }
+                showError("Server Error", `Server error code ${res.status}. Kripya thodi der me try karein.`);
+                return;
+            }
 
             if (!res.ok || !data.success) {
                 showError("Video Fetch Nahi Hua", data.error || "YouTube server se data prapt nahi ho saka.");
@@ -142,7 +154,7 @@ document.addEventListener("DOMContentLoaded", () => {
             showToast("Video metadata prapt ho gaya!", "success");
 
         } catch (err) {
-            showError("Connection Error", "Local server se connect nahi ho saka: " + err.message);
+            showError("Connection Error", "Server se connect nahi ho saka: " + err.message);
         } finally {
             setFetchLoading(false);
         }
