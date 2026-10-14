@@ -335,6 +335,12 @@ def run_download_worker(task_id, url, quality, title):
     if not task:
         return
 
+    # Clean URL: strip playlist and tracking query parameters
+    match = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
+    if match:
+        clean_id = match.group(1)
+        url = f"https://www.youtube.com/watch?v={clean_id}"
+
     safe_title = sanitize_filename(title or "youtube_video")[:80]
     out_template = str(DOWNLOAD_DIR / f"{safe_title}_{task_id}.%(ext)s")
 
