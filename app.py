@@ -110,6 +110,7 @@ def ensure_cookies():
 def get_yt_base_args():
     ensure_cookies()
     args = [
+        "-4",
         "--no-check-certificates",
         "--socket-timeout", "30",
     ]
@@ -132,6 +133,12 @@ def get_info():
 
     if not url:
         return jsonify({"success": False, "error": "Kripya YouTube video link enter karein"}), 400
+
+    # Clean URL: strip playlist and tracking query parameters for single video downloads
+    match = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
+    if match:
+        clean_id = match.group(1)
+        url = f"https://www.youtube.com/watch?v={clean_id}"
 
     base_args = get_yt_base_args()
 
@@ -178,19 +185,27 @@ def get_info():
                     pass
             else:
                 last_error = proc.stderr.strip()
+                last_lower = last_error.lower()
                 # Fast exit for permanent errors
-                if "Video unavailable" in last_error or "Private video" in last_error:
+                if "unavailable" in last_lower or "private" in last_lower:
                     break
         except subprocess.TimeoutExpired:
             last_error = "YouTube server response timeout ho gaya (35s)."
             continue
 
     if not info:
-        if "Video unavailable" in last_error:
-            return jsonify({"success": False, "error": "Yeh video available nahi hai ya private hai."}), 400
-        elif "Private video" in last_error:
+        last_lower = last_error.lower()
+        if "unavailable" in last_lower:
+            return jsonify({"success": False, "error": "Yeh video YouTube par available nahi hai ya delete ho chuki hai."}), 400
+        elif "private" in last_lower:
             return jsonify({"success": False, "error": "Yeh video private hai."}), 400
-        elif "Sign in" in last_error:
+        elif "sign in" in last_lower or "bot" in last_lower:
+            has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
+            if not has_cookies:
+                return jsonify({
+                    "success": False,
+                    "error": "YouTube cloud verification required. Kripya Render dashboard me YOUTUBE_COOKIES add karein."
+                }), 400
             return jsonify({"success": False, "error": "YouTube anti-bot verification trigger hua hai. Thodi der me retry karein."}), 400
         return jsonify({"success": False, "error": f"Video fetch nahi ho saka: {last_error[:200]}"}), 400
 
