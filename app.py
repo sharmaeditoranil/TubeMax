@@ -143,21 +143,13 @@ def get_info():
     has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
     # Multi-strategy retry for anti-bot / datacenter protection
-    # Note: android/android_vr clients do NOT support cookies, web client does!
-    if has_cookies:
-        strategies = [
-            ([], True),                                                            # 1. Web client with cookies
-            (["--extractor-args", "youtube:player_client=android_vr"], False),     # 2. Android VR without cookies
-            (["--extractor-args", "youtube:player_client=android"], False),        # 3. Android without cookies
-            (["--extractor-args", "youtube:player_client=mweb"], True),            # 4. Mobile web with cookies
-        ]
-    else:
-        strategies = [
-            (["--extractor-args", "youtube:player_client=android_vr"], False),     # 1. Android VR (bypasses bot challenges)
-            (["--extractor-args", "youtube:player_client=android"], False),        # 2. Android client
-            (["--extractor-args", "youtube:player_client=mweb"], False),           # 3. Mobile web fallback
-            ([], False),                                                           # 4. Standard fallback
-        ]
+    # Priority: android_vr & android run fast and don't require cookies. Web is fallback.
+    strategies = [
+        (["--extractor-args", "youtube:player_client=android_vr"], False),     # 1. Android VR (bypasses bot challenges, extracts 4K/2K/1080p)
+        (["--extractor-args", "youtube:player_client=android"], False),        # 2. Android client
+        (["--extractor-args", "youtube:player_client=mweb"], False),           # 3. Mobile web fallback
+        ([], True if has_cookies else False),                                  # 4. Web fallback (with cookies if available)
+    ]
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
@@ -182,7 +174,7 @@ def get_info():
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=35,
+                timeout=12,
                 env=env
             )
 
