@@ -7,6 +7,8 @@ import re
 import subprocess
 import threading
 import shutil
+import urllib.request
+import urllib.error
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, send_file, Response
 from flask_cors import CORS
@@ -112,7 +114,7 @@ def get_yt_base_args(with_cookies=True):
     args = [
         "-4",
         "--no-check-certificates",
-        "--socket-timeout", "30",
+        "--socket-timeout", "10",
     ]
     if with_cookies and COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0:
         args.extend(["--cookies", str(COOKIES_FILE)])
@@ -121,6 +123,57 @@ def get_yt_base_args(with_cookies=True):
 def sanitize_filename(name):
     # Keep alphanumeric, spaces, and common safe chars
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
+
+def verify_and_resolve_youtube_url(raw_url):
+    """Clean YouTube URL and auto-correct common letter O vs digit 0 typos via fast oEmbed check."""
+    match = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', raw_url)
+    if not match:
+        return raw_url, None
+
+    clean_id = match.group(1)
+
+    # 1. Fast check if original ID is valid on YouTube
+    oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={clean_id}&format=json"
+    req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            return f"https://www.youtube.com/watch?v={clean_id}", data
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # 2. Check for common O (capital letter O) vs 0 (zero) typos
+            variations = []
+            if 'O' in clean_id:
+                variations.append(clean_id.replace('O', '0'))
+                for i, ch in enumerate(clean_id):
+                    if ch == 'O':
+                        v = list(clean_id)
+                        v[i] = '0'
+                        variations.append(''.join(v))
+            if '0' in clean_id:
+                variations.append(clean_id.replace('0', 'O'))
+                for i, ch in enumerate(clean_id):
+                    if ch == '0':
+                        v = list(clean_id)
+                        v[i] = 'O'
+                        variations.append(''.join(v))
+
+            for v_id in variations:
+                v_oembed = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={v_id}&format=json"
+                v_req = urllib.request.Request(v_oembed, headers={"User-Agent": "Mozilla/5.0"})
+                try:
+                    with urllib.request.urlopen(v_req, timeout=2) as v_resp:
+                        v_data = json.loads(v_resp.read().decode())
+                        print(f"[TubeMax] Auto-corrected video ID typo: {clean_id} -> {v_id}")
+                        return f"https://www.youtube.com/watch?v={v_id}", v_data
+                except Exception:
+                    pass
+            # Confirmed 404 Not Found
+            return None, "NOT_FOUND"
+    except Exception:
+        pass
+
+    return f"https://www.youtube.com/watch?v={clean_id}", None
 
 @app.route("/")
 def index():
@@ -134,11 +187,16 @@ def get_info():
     if not url:
         return jsonify({"success": False, "error": "Kripya YouTube video link enter karein"}), 400
 
-    # Clean URL: strip playlist and tracking query parameters for single video downloads
-    match = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
-    if match:
-        clean_id = match.group(1)
-        url = f"https://www.youtube.com/watch?v={clean_id}"
+    # Validate and auto-correct typos (e.g. letter O vs digit 0)
+    resolved_url, oembed_data = verify_and_resolve_youtube_url(url)
+    if resolved_url is None and oembed_data == "NOT_FOUND":
+        return jsonify({
+            "success": False,
+            "error": "Yeh video YouTube par available nahi hai ya link galat hai (kripya link check karein)."
+        }), 400
+    
+    if resolved_url:
+        url = resolved_url
 
     has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
@@ -176,7 +234,7 @@ def get_info():
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=12,
+                timeout=20,
                 env=env
             )
 
@@ -190,10 +248,10 @@ def get_info():
                 last_error = proc.stderr.strip()
                 last_lower = last_error.lower()
                 # Fast exit for permanent errors
-                if "unavailable" in last_lower or "private" in last_lower:
+                if "unavailable" in last_lower or "private" in last_lower or "does not exist" in last_lower:
                     break
         except subprocess.TimeoutExpired:
-            last_error = "YouTube server response timeout ho gaya (35s)."
+            last_error = "YouTube server response timeout ho gaya. Kripya link verify karein."
             continue
 
     if not info:
@@ -329,11 +387,10 @@ def run_download_worker(task_id, url, quality, title):
     if not task:
         return
 
-    # Clean URL: strip playlist and tracking query parameters
-    match = re.search(r'(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})', url)
-    if match:
-        clean_id = match.group(1)
-        url = f"https://www.youtube.com/watch?v={clean_id}"
+    # Clean URL and resolve any typos
+    resolved_url, _ = verify_and_resolve_youtube_url(url)
+    if resolved_url:
+        url = resolved_url
 
     safe_title = sanitize_filename(title or "youtube_video")[:80]
     out_template = str(DOWNLOAD_DIR / f"{safe_title}_{task_id}.%(ext)s")
