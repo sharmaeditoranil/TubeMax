@@ -143,18 +143,15 @@ def get_info():
     has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
     # Multi-strategy retry for anti-bot / datacenter protection
-    strategies = []
+    # Priority: Android and Android VR clients bypass SABR, 403s, and consent interstitials in 2 seconds without cookies!
+    strategies = [
+        (["--extractor-args", "youtube:player_client=android,android_vr"], False),
+        (["--extractor-args", "youtube:player_client=android"], False),
+        (["--extractor-args", "youtube:player_client=android_vr"], False),
+    ]
     if has_cookies:
-        # 1. If cookies are provided, use authenticated web client (yields 4K, 1080p, full audio)
+        # Fallback to authenticated web client if available
         strategies.append(([], True))
-
-    # 2. Android VR (bypasses SABR challenge, extracts 4K/2K/1080p)
-    strategies.append((["--extractor-args", "youtube:player_client=android_vr"], False))
-    # 3. Android client (fast progressive streams)
-    strategies.append((["--extractor-args", "youtube:player_client=android"], False))
-    if not has_cookies:
-        # 4. Standard web fallback
-        strategies.append(([], False))
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
@@ -346,32 +343,22 @@ def run_download_worker(task_id, url, quality, title):
 
     has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
-    if has_cookies:
-        # Full authenticated pipeline: extracts best video and audio streams up to 4K without bot challenges
+    if quality in ("2160p", "1440p") and has_cookies:
+        # 4K & 2K Ultra HD require DASH stream muxing with authenticated cookies
         base_args = get_yt_base_args(with_cookies=True)
         client_arg = []
-        if quality in ("mp3", "m4a"):
-            format_args = ["-x", "--audio-format", quality]
-        elif quality == "2160p":
-            format_args = ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best", "--merge-output-format", "mp4"]
-        elif quality == "1440p":
-            format_args = ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best", "--merge-output-format", "mp4"]
-        elif quality == "1080p":
-            format_args = ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "--merge-output-format", "mp4"]
-        elif quality == "720p":
-            format_args = ["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best", "--merge-output-format", "mp4"]
-        elif quality == "480p":
-            format_args = ["-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best", "--merge-output-format", "mp4"]
-        else:
-            format_args = ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
-    else:
-        # Fallback without cookies: Use android progressive streams
+        max_h = 2160 if quality == "2160p" else 1440
+        format_args = ["-f", f"bestvideo[height<={max_h}]+bestaudio/best[height<={max_h}]/best", "--merge-output-format", "mp4"]
+    elif quality in ("mp3", "m4a"):
+        # Audio extraction via native android stream
         base_args = get_yt_base_args(with_cookies=False)
         client_arg = ["--extractor-args", "youtube:player_client=android"]
-        if quality in ("mp3", "m4a"):
-            format_args = ["-x", "--audio-format", quality]
-        else:
-            format_args = ["-f", "best/b", "--merge-output-format", "mp4"]
+        format_args = ["-x", "--audio-format", quality]
+    else:
+        # 1080p/720p/480p Video downloads: Android client progressive stream natively avoids SABR & 403 Forbidden
+        base_args = get_yt_base_args(with_cookies=False)
+        client_arg = ["--extractor-args", "youtube:player_client=android"]
+        format_args = ["-f", "best/b", "--merge-output-format", "mp4"]
 
     cmd = [
         YT_DLP_BIN,
