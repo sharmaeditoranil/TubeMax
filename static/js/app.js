@@ -42,6 +42,18 @@ document.addEventListener("DOMContentLoaded", () => {
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
     const sampleChips = document.querySelectorAll(".sample-chip");
 
+    // Cookies Modal Elements
+    const cookiesModalBtn = document.getElementById("cookiesModalBtn");
+    const cookiesStatusDot = document.getElementById("cookiesStatusDot");
+    const cookiesModal = document.getElementById("cookiesModal");
+    const closeCookiesModalBtn = document.getElementById("closeCookiesModalBtn");
+    const cookiesBanner = document.getElementById("cookiesBanner");
+    const cookiesStatusIcon = document.getElementById("cookiesStatusIcon");
+    const cookiesStatusText = document.getElementById("cookiesStatusText");
+    const cookiesInput = document.getElementById("cookiesInput");
+    const saveCookiesBtn = document.getElementById("saveCookiesBtn");
+    const errorFixBtn = document.getElementById("errorFixBtn");
+
     // API Base URL: local if on localhost, otherwise auto-point to Render backend
     const isLocal = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
     const API_BASE = (window.API_BASE !== undefined ? window.API_BASE : (isLocal ? "" : "https://tubemax.onrender.com")).replace(/\/$/, "");
@@ -73,11 +85,19 @@ document.addEventListener("DOMContentLoaded", () => {
         errorTitle.textContent = title;
         errorMessage.textContent = msg;
         errorAlert.style.display = "flex";
+
+        // If error is related to cookies or bot verification, show 1-click cookie fix button
+        const isBotCheck = /cookie|verification|not a bot|sign in/i.test(msg);
+        if (errorFixBtn) {
+            errorFixBtn.style.display = isBotCheck ? "inline-flex" : "none";
+        }
+
         errorAlert.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
     function hideError() {
         errorAlert.style.display = "none";
+        if (errorFixBtn) errorFixBtn.style.display = "none";
     }
 
     // Paste button
@@ -446,6 +466,108 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Initial load
+    // Cookies Management
+    async function checkCookiesStatus() {
+        try {
+            const res = await fetch(`${API_BASE}/api/cookies`);
+            if (res.ok) {
+                const data = await res.json();
+                updateCookiesStatusUI(data.has_cookies, data.cookie_file_size || 0);
+            }
+        } catch (err) {
+            console.warn("Could not check cookies status:", err);
+        }
+    }
+
+    function updateCookiesStatusUI(hasCookies, fileSize) {
+        if (cookiesStatusDot) {
+            cookiesStatusDot.className = hasCookies ? "status-dot-online" : "status-dot-offline";
+            cookiesStatusDot.title = hasCookies ? "Cookies Active: Server Verified" : "Cookies Missing: Add Cookies";
+        }
+        if (cookiesBanner) {
+            if (hasCookies) {
+                cookiesBanner.className = "cookies-status-banner banner-success";
+                cookiesStatusIcon.textContent = "✓";
+                cookiesStatusText.textContent = `Server Cookies Active (${(fileSize / 1024).toFixed(1)} KB loaded). Full 4K & News bypass active!`;
+            } else {
+                cookiesBanner.className = "cookies-status-banner banner-warning";
+                cookiesStatusIcon.textContent = "⚠️";
+                cookiesStatusText.textContent = "No server cookies loaded. Cloud datacenter protection requires cookies for restricted videos.";
+            }
+        }
+    }
+
+    if (cookiesModalBtn) {
+        cookiesModalBtn.addEventListener("click", () => {
+            cookiesModal.style.display = "flex";
+            checkCookiesStatus();
+        });
+    }
+
+    if (errorFixBtn) {
+        errorFixBtn.addEventListener("click", () => {
+            cookiesModal.style.display = "flex";
+            checkCookiesStatus();
+        });
+    }
+
+    if (closeCookiesModalBtn) {
+        closeCookiesModalBtn.addEventListener("click", () => {
+            cookiesModal.style.display = "none";
+        });
+    }
+
+    if (cookiesModal) {
+        cookiesModal.addEventListener("click", (e) => {
+            if (e.target === cookiesModal) {
+                cookiesModal.style.display = "none";
+            }
+        });
+    }
+
+    if (saveCookiesBtn) {
+        saveCookiesBtn.addEventListener("click", async () => {
+            const text = (cookiesInput.value || "").trim();
+            if (!text) {
+                showToast("Kripya cookies text paste karein", "error");
+                return;
+            }
+
+            const btnText = saveCookiesBtn.querySelector(".btn-text");
+            const btnLoader = saveCookiesBtn.querySelector(".btn-loader");
+            btnText.style.display = "none";
+            btnLoader.style.display = "inline-flex";
+            saveCookiesBtn.disabled = true;
+
+            try {
+                const res = await fetch(`${API_BASE}/api/cookies`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ cookies: text })
+                });
+
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showToast("Cookies successfully server par save ho gayi!", "success");
+                    updateCookiesStatusUI(true, text.length);
+                    cookiesInput.value = "";
+                    setTimeout(() => {
+                        cookiesModal.style.display = "none";
+                    }, 1200);
+                } else {
+                    showToast(data.error || "Cookies save karne me error aaya", "error");
+                }
+            } catch (err) {
+                showToast("Server connection error: " + err.message, "error");
+            } finally {
+                btnText.style.display = "inline";
+                btnLoader.style.display = "none";
+                saveCookiesBtn.disabled = false;
+            }
+        });
+    }
+
+    // Initial loads
     loadHistory();
+    checkCookiesStatus();
 });

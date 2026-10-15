@@ -143,13 +143,18 @@ def get_info():
     has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
 
     # Multi-strategy retry for anti-bot / datacenter protection
-    # Priority: android_vr & android run fast and don't require cookies. Web is fallback.
-    strategies = [
-        (["--extractor-args", "youtube:player_client=android_vr"], False),     # 1. Android VR (bypasses bot challenges, extracts 4K/2K/1080p)
-        (["--extractor-args", "youtube:player_client=android"], False),        # 2. Android client
-        (["--extractor-args", "youtube:player_client=mweb"], False),           # 3. Mobile web fallback
-        ([], True if has_cookies else False),                                  # 4. Web fallback (with cookies if available)
-    ]
+    strategies = []
+    if has_cookies:
+        # 1. If cookies are provided, use authenticated web client (yields 4K, 1080p, full audio)
+        strategies.append(([], True))
+
+    # 2. Android VR (bypasses SABR challenge, extracts 4K/2K/1080p)
+    strategies.append((["--extractor-args", "youtube:player_client=android_vr"], False))
+    # 3. Android client (fast progressive streams)
+    strategies.append((["--extractor-args", "youtube:player_client=android"], False))
+    if not has_cookies:
+        # 4. Standard web fallback
+        strategies.append(([], False))
 
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
@@ -339,15 +344,34 @@ def run_download_worker(task_id, url, quality, title):
     env = os.environ.copy()
     env["PATH"] = f"/opt/homebrew/bin:/usr/local/bin:{env.get('PATH', '')}"
 
-    if quality in ("mp3", "m4a"):
-        format_args = ["-x", "--audio-format", quality]
-        base_args = get_yt_base_args(with_cookies=False)
-        client_arg = ["--extractor-args", "youtube:player_client=android"]
+    has_cookies = COOKIES_FILE.exists() and COOKIES_FILE.stat().st_size > 0
+
+    if has_cookies:
+        # Full authenticated pipeline: extracts best video and audio streams up to 4K without bot challenges
+        base_args = get_yt_base_args(with_cookies=True)
+        client_arg = []
+        if quality in ("mp3", "m4a"):
+            format_args = ["-x", "--audio-format", quality]
+        elif quality == "2160p":
+            format_args = ["-f", "bestvideo[height<=2160]+bestaudio/best[height<=2160]/best", "--merge-output-format", "mp4"]
+        elif quality == "1440p":
+            format_args = ["-f", "bestvideo[height<=1440]+bestaudio/best[height<=1440]/best", "--merge-output-format", "mp4"]
+        elif quality == "1080p":
+            format_args = ["-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best", "--merge-output-format", "mp4"]
+        elif quality == "720p":
+            format_args = ["-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best", "--merge-output-format", "mp4"]
+        elif quality == "480p":
+            format_args = ["-f", "bestvideo[height<=480]+bestaudio/best[height<=480]/best", "--merge-output-format", "mp4"]
+        else:
+            format_args = ["-f", "bestvideo+bestaudio/best", "--merge-output-format", "mp4"]
     else:
-        # Android client downloads progressive stream natively without cookies or 403 blocks
-        format_args = ["-f", "best/b", "--merge-output-format", "mp4"]
+        # Fallback without cookies: Use android progressive streams
         base_args = get_yt_base_args(with_cookies=False)
         client_arg = ["--extractor-args", "youtube:player_client=android"]
+        if quality in ("mp3", "m4a"):
+            format_args = ["-x", "--audio-format", quality]
+        else:
+            format_args = ["-f", "best/b", "--merge-output-format", "mp4"]
 
     cmd = [
         YT_DLP_BIN,
